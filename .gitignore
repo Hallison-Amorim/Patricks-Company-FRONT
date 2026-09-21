@@ -1,0 +1,15 @@
+# Ambientes (nunca versionar)
+.env
+.env.local
+.env.*.local
+
+# Dependências / builds
+node_modules/
+dist/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

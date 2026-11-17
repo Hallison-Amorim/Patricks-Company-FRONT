@@ -1,31 +1,68 @@
-import { useEffect, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
+import { Session } from '@supabase/supabase-js';
 import { createRoot } from 'react-dom/client';
+import { supabase } from './lib/supabase';
 import './styles.css';
 import './equipment-images.css';
 
-type Equipment = { id: string; name: string; category: string; status: 'available' | 'maintenance' | 'loaned'; imageUrl?: string | null };
+type Equipment = { id: string; name: string; category: string; status: 'available' | 'maintenance' | 'loaned'; imageUrl: string | null };
+type Loan = { id: string; equipmentId: string; equipmentName: string; dueAt: string };
 
-const initialEquipment: Equipment[] = [
-  ['TI-0001','Notebook 14 polegadas','Notebook','available'], ['TI-0002','Notebook 15 polegadas','Notebook','available'], ['TI-0003','Notebook 13 polegadas','Notebook','available'], ['TI-0004','Notebook 15 polegadas','Notebook','maintenance'],
-  ['TI-0005','Monitor 24 polegadas','Monitor','available'], ['TI-0006','Monitor 27 polegadas','Monitor','available'], ['TI-0007','Monitor 22 polegadas','Monitor','maintenance'], ['TI-0008','Cabo HDMI 2 m','Cabo','available'],
-  ['TI-0009','Cabo USB-C 1 m','Cabo','available'], ['TI-0010','Cabo de rede 3 m','Cabo','maintenance'], ['TI-0011','Webcam Full HD','Câmera','available'], ['TI-0012','Câmera compacta','Câmera','available'],
-].map(([id, name, category, status]) => ({ id, name, category, status: status as Equipment['status'], imageUrl: `/equipment/${id.toLowerCase()}.jpg` }));
 const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/api';
 
-function dueDate() { const date = new Date(); date.setDate(date.getDate() + 14); return date.toLocaleDateString('pt-BR'); }
-function imageSource(item: Equipment) { return item.imageUrl?.startsWith('http') ? item.imageUrl : `/equipment/${item.id.toLowerCase()}.jpg`; }
-
 function App() {
-  const [equipment, setEquipment] = useState(initialEquipment);
-  const [loans, setLoans] = useState<Equipment[]>([]);
+  const [session, setSession] = useState<Session | null>(null);
+  const [equipment, setEquipment] = useState<Equipment[]>([]);
+  const [loans, setLoans] = useState<Loan[]>([]);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [message, setMessage] = useState('');
-  useEffect(() => { fetch(`${apiUrl}/catalog`).then((response) => response.ok ? response.json() : Promise.reject()).then((items: Equipment[]) => setEquipment(items.map((item) => ({ ...item, imageUrl: imageSource(item) })))).catch(() => setMessage('API indisponível: exibindo catálogo local temporário.')); }, []);
-  async function request(item: Equipment) {
-    if (loans.length >= 3) return setMessage('Você atingiu o limite de 3 empréstimos em aberto.');
-    if (item.status !== 'available') return setMessage('Este equipamento não está disponível para empréstimo.');
-    try { const response = await fetch(`${apiUrl}/loans/${item.id}`, { method: 'POST' }); if (!response.ok) throw new Error(); const loan = await response.json(); setLoans((current) => [...current, item]); setEquipment((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'loaned' } : entry)); setMessage(`${item.name} solicitado. Devolução prevista: ${new Date(`${loan.dueAt}T00:00:00`).toLocaleDateString('pt-BR')}.`); } catch { setMessage('Não foi possível registrar o empréstimo na API.'); }
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
+    return () => subscription.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => { if (session) void loadData(); }, [session]);
+
+  async function api<T>(path: string, init?: RequestInit): Promise<T> {
+    const response = await fetch(`${apiUrl}${path}`, { ...init, headers: { ...init?.headers, Authorization: `Bearer ${session?.access_token ?? ''}` } });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { message?: string } | null;
+      throw new Error(body?.message ?? 'Não foi possível concluir a operação.');
+    }
+    return response.json() as Promise<T>;
   }
-  return <main className="app"><header><p>EMPREST.AI</p><h1>Catálogo de equipamentos</h1><span>Colaborador</span></header>{message && <div className="notice">{message}</div>}<section><h2>Disponíveis e manutenção</h2><div className="grid">{equipment.map((item) => <article className="card" key={item.id}><img className="image" src={imageSource(item)} alt={item.name} /><small>{item.id}</small><h3>{item.name}</h3><p>{item.category}</p><strong className={item.status}>{item.status === 'available' ? 'Disponível' : item.status === 'maintenance' ? 'Em manutenção' : 'Emprestado'}</strong><button disabled={item.status !== 'available' || loans.length >= 3} onClick={() => request(item)}>Solicitar</button></article>)}</div></section><section className="loans"><h2>Meus empréstimos</h2>{loans.length === 0 ? <p>Nenhum empréstimo em aberto.</p> : <ul>{loans.map((item) => <li key={item.id}>{item.name} <span>Devolução: {dueDate()}</span></li>)}</ul>}<a href="https://pixabay.com" target="_blank" rel="noreferrer">Fotos: Pixabay</a></section></main>;
+
+  async function loadData(): Promise<void> {
+    try {
+      const [catalog, myLoans] = await Promise.all([api<Equipment[]>('/catalog'), api<Loan[]>('/loans')]);
+      setEquipment(catalog); setLoans(myLoans); setMessage('');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Não foi possível carregar os dados.'); }
+  }
+
+  async function signIn(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!supabase) return setMessage('Supabase não foi configurado neste ambiente.');
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    if (error) setMessage('E-mail ou senha inválidos.');
+  }
+
+  async function requestLoan(item: Equipment): Promise<void> {
+    setLoading(true);
+    try { await api<Loan>(`/loans/${item.id}`, { method: 'POST' }); await loadData(); setMessage('Empréstimo solicitado com sucesso.'); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Não foi possível solicitar o item.'); }
+    finally { setLoading(false); }
+  }
+
+  if (!session) return <main className="login"><section><p>EMPREST.AI</p><h1>Empréstimos de TI sem planilha.</h1><span>Até 5 itens por pessoa · prazo de 14 dias úteis</span></section><form onSubmit={signIn}><h2>Entrar</h2><label>E-mail<input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required /></label><label>Senha<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required /></label>{message && <div className="notice">{message}</div>}<button disabled={loading}>{loading ? 'Entrando…' : 'Entrar'}</button></form></main>;
+
+  return <main className="app"><header><div><p>EMPREST.AI</p><h1>Catálogo de equipamentos</h1></div><button onClick={() => supabase?.auth.signOut()}>Sair</button></header>{message && <div className="notice">{message}</div>}<section><h2>{equipment.filter((item) => item.status === 'available').length} equipamentos disponíveis</h2><div className="grid">{equipment.map((item) => <article className="card" key={item.id}><img className="image" src={item.imageUrl ?? ''} alt={item.name} /><small>{item.id}</small><h3>{item.name}</h3><p>{item.category}</p><strong className={item.status}>{item.status === 'available' ? 'Disponível' : item.status === 'maintenance' ? 'Em manutenção' : 'Emprestado'}</strong><button disabled={loading || item.status !== 'available'} onClick={() => void requestLoan(item)}>{item.status === 'available' ? 'Solicitar' : 'Indisponível'}</button></article>)}</div></section><section className="loans"><h2>Meus empréstimos ({loans.length} de 5)</h2>{loans.length === 0 ? <p>Nenhum empréstimo em aberto.</p> : <ul>{loans.map((loan) => <li key={loan.id}>{loan.equipmentName} <span>Devolução: {new Date(`${loan.dueAt}T00:00:00`).toLocaleDateString('pt-BR')}</span></li>)}</ul>}</section></main>;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);
